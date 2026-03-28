@@ -1,0 +1,8 @@
+
+## VOLARE PIPELINE
+
+An R template for running pairwise cross-domain regression screens and assembling the output into JSON files compatible with VOLARE. \n
+Define your predictor domains, outcomes, and covariates.
+
+The script handles the regression loop, significance filtering, mPlot line endpoint computation, influence diagnostics, and JSON packaging. \n
+Designed for multi-omic datasets to visually explore which baseline variables predict longitudinal outcomes.
