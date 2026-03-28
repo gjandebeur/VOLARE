@@ -1,8 +1,316 @@
+## VOLARE Pairwise Regression Template
+### Section 1 — Parameters & Predictor Definitions
+```{r setup}
+library(tidyverse)
+library(jsonlite)
+library(readxl)
 
-## VOLARE PIPELINE
+# ── PATHS (CHANGE THESE) ──
+dataPath        <- "path/to/your_data.xlsx"
+outputPath      <- "path/to/regressionModels.csv"
+jsonOut         <- "path/to/output_forVolare.json"
 
-An R template for running pairwise cross-domain regression screens and assembling the output into JSON files compatible with VOLARE. \n
-Define your predictor domains, outcomes, and covariates.
+# Optional: CpG methylation data
+# betaPath        <- "path/to/beta_matrix.rds"
+# sampleSheetPath <- "path/to/sample_sheet.csv"
 
-The script handles the regression loop, significance filtering, mPlot line endpoint computation, influence diagnostics, and JSON packaging. \n
-Designed for multi-omic datasets to visually explore which baseline variables predict longitudinal outcomes.
+pThreshold <- 0.05
+
+# ── PREDICTOR DOMAINS ──
+# Define column name vectors for each domain in your dataset.
+# Add/remove domains as needed.
+
+domain1Cols <- c("var1", "var2", "var3")
+domain2Cols <- c("var4", "var5", "var6")
+domain3Cols <- c("var7", "var8", "var9")
+
+# Outcomes — column names of the raw outcome measures at each timepoint.
+# The script computes change scores automatically (timepoint2 - timepoint1).
+outcomeSources <- c("outcome1", "outcome2")
+outcomeCols    <- paste0(outcomeSources, "_change")
+
+predictorCols <- c(domain1Cols, domain2Cols, domain3Cols)
+
+# VOLARE domain colors (one hex color per domain)
+myColors <- c("#fb8072", "#80b1d3", "#f9a8d4", "#b3de69")
+
+myAssays <- list(
+  "Outcome_"  = list("#fb8072"),
+  "Domain1_"  = list("#80b1d3"),
+  "Domain2_"  = list("#f9a8d4"),
+  "Domain3_"  = list("#b3de69")
+)
+```
+
+---
+
+### Section 2 — CpG Data Preparation (Optional)
+
+Skip this section if you don't have methylation data. If you do, provide a
+probe × sample beta matrix (.rds) and a sample sheet mapping array barcodes
+to subject IDs.
+```{r cpg-prep, eval=FALSE}
+beta  <- readRDS(betaPath)
+sheet <- read.csv(sampleSheetPath, skip = 7, header = TRUE)
+
+sheet$idat_key <- paste0(sheet$Sentrix_ID, "_", sheet$Sentrix_Position)
+
+# Filter to baseline samples — adjust the grep pattern to match your naming
+sheet_bl <- sheet[grepl("-BL", sheet$Sample_Name), ]
+sheet_bl$record_id <- as.numeric(gsub(".*-(\\d+)-.*", "\\1", sheet_bl$Sample_Name))
+
+lookup <- sheet_bl[, c("idat_key", "record_id")]
+
+beta_t          <- as.data.frame(t(beta))
+beta_t$idat_key <- rownames(beta_t)
+
+cpg_wide          <- merge(lookup, beta_t, by = "idat_key")
+cpg_wide$idat_key <- NULL
+```
+
+---
+
+### Section 3 — Load Data, Compute Deltas, Build Analytic Dataset
+
+Expects a longitudinal dataset with a timepoint column. Pulls baseline
+predictor values and computes outcome change scores (timepoint2 − timepoint1).
+```{r load-data}
+keyCols <- c("record_id", "Week", "age", "sex", outcomeSources, predictorCols)
+
+# Group assignment (e.g., treatment arm, site, condition)
+cohortMap <- read_excel(dataPath, sheet = "Covariates") %>%
+  select(record_id, Intervention) %>%
+  mutate(record_id = as.character(record_id),
+         Cohort    = as.factor(Intervention)) %>%
+  select(record_id, Cohort)
+
+# Load baseline and follow-up rows
+dataIn <- read_excel(
+  path      = dataPath,
+  sheet     = "Longitudinal",
+  col_types = "text"
+) %>%
+  select(all_of(keyCols)) %>%
+  mutate(
+    Week = as.integer(Week),
+    across(-record_id, as.numeric)
+  ) %>%
+  filter(Week %in% c(0, 26))  # adjust timepoints to your design
+
+# Compute change scores
+delta <- dataIn %>%
+  select(record_id, Week, all_of(outcomeSources)) %>%
+  pivot_longer(cols = all_of(outcomeSources), names_to = "measure", values_to = "value") %>%
+  pivot_wider(names_from = Week, values_from = value, names_prefix = "wk") %>%
+  filter(!is.na(wk0) & !is.na(wk26)) %>%
+  mutate(change = wk26 - wk0) %>%
+  select(record_id, measure, change) %>%
+  pivot_wider(names_from = measure, values_from = change,
+              names_glue = "{measure}_change")
+
+# Assemble one row per participant
+modelDat <- dataIn %>%
+  filter(Week == 0) %>%
+  inner_join(delta, by = "record_id") %>%
+  inner_join(cohortMap, by = "record_id") %>%
+  select(record_id, Cohort, age, sex,
+         all_of(outcomeCols),
+         all_of(predictorCols))
+
+# Optional: merge CpG data
+# cpg_wide$record_id <- as.character(cpg_wide$record_id)
+# modelDat$record_id <- as.character(modelDat$record_id)
+# modelDat <- left_join(modelDat, cpg_wide, by = "record_id")
+# cpgCols <- grep("^cg", colnames(modelDat), value = TRUE)
+# predictorCols <- c(predictorCols, cpgCols)
+
+cat("Analytic N:", nrow(modelDat), "\n")
+```
+
+---
+
+### Section 4 — Pairwise Cross-Domain Regressions
+```{r regressions}
+write(paste("ana1", "ana2", "obsF", "obsP", sep = ","), outputPath, append = FALSE)
+
+crossDomainPairs <- list(
+  list(yVars = outcomeCols, xVars = domain1Cols),
+  list(yVars = outcomeCols, xVars = domain2Cols),
+  list(yVars = outcomeCols, xVars = domain3Cols)
+  # Add more pairs as needed, e.g.:
+  # list(yVars = outcomeCols, xVars = cpgCols)
+)
+
+for (pair in crossDomainPairs) {
+  for (yCol in pair$yVars) {
+    for (xCol in pair$xVars) {
+      loopDat <- modelDat[complete.cases(modelDat[, c(yCol, xCol, "age", "sex", "Cohort")]), ]
+      if (nrow(loopDat) < 10) next
+      m    <- lm(as.formula(paste(yCol, "~", xCol, "+ age + sex + Cohort")), data = loopDat)
+      mRed <- lm(as.formula(paste(yCol, "~ age + sex + Cohort")),            data = loopDat)
+      a    <- anova(m, mRed)
+      write(paste(yCol, xCol, a$F[2], a$"Pr(>F)"[2], sep = ","),
+            outputPath, append = TRUE)
+    }
+  }
+}
+```
+
+---
+
+### Section 5 — Significance Filtering
+```{r fdr}
+# Option A: BH-corrected FDR (uncomment for multiple testing correction)
+# bos      <- read.csv(outputPath, header = TRUE)
+# bos$pAdj <- p.adjust(bos$obsP, method = "BH")
+# bos      <- bos[bos$pAdj < pThreshold, ]
+
+# Option B: Nominal p (exploratory)
+bos <- read.csv(outputPath, header = TRUE)
+bos <- bos[bos$obsP < pThreshold, ]
+
+cat("Significant associations:", nrow(bos), "\n")
+```
+
+---
+
+### Section 6 — VOLARE JSON Assembly
+
+For each significant association: extracts slope and per-group intercepts,
+computes mPlot line endpoints, calculates DFFITS influence, and builds
+the JSON structure VOLARE expects.
+```{r json-assembly}
+if (nrow(bos) == 0) stop("No associations survived filtering — relax pThreshold.")
+
+# Domain prefixes for VOLARE node coloring
+prefix_map <- c(
+  setNames(paste0("Outcome_", outcomeCols), outcomeCols),
+  setNames(paste0("Domain1_", domain1Cols), domain1Cols),
+  setNames(paste0("Domain2_", domain2Cols), domain2Cols),
+  setNames(paste0("Domain3_", domain3Cols), domain3Cols)
+  # Add CpG if used:
+  # setNames(paste0("CpG_", cpgCols), cpgCols)
+)
+
+modelDat_v <- modelDat
+colnames(modelDat_v) <- ifelse(
+  colnames(modelDat_v) %in% names(prefix_map),
+  prefix_map[colnames(modelDat_v)],
+  colnames(modelDat_v)
+)
+
+bos$ana1 <- ifelse(bos$ana1 %in% names(prefix_map), prefix_map[bos$ana1], bos$ana1)
+bos$ana2 <- ifelse(bos$ana2 %in% names(prefix_map), prefix_map[bos$ana2], bos$ana2)
+
+n      <- nrow(modelDat_v)
+cohort <- levels(modelDat_v$Cohort)
+nCo    <- length(cohort)
+
+# Initialize collectors
+mySummary <- data.frame(key = NULL, Assays = NULL, Analyte1 = NULL, Analyte2 = NULL,
+                        Corr = NULL, pCorr = NULL, estEff = NULL, maxInfluence = NULL)
+mPlot    <- NULL
+myDetail <- modelDat_v[, c("record_id", "Cohort")]
+
+for (myRow in 1:nrow(bos)) {
+  yAna <- as.character(bos$ana1[myRow])
+  xAna <- as.character(bos$ana2[myRow])
+
+  fitDat <- modelDat_v[complete.cases(modelDat_v[, c(yAna, xAna, "Cohort")]), ]
+
+  if (!(yAna %in% colnames(myDetail))) myDetail <- cbind(myDetail, modelDat_v[yAna])
+  if (!(xAna %in% colnames(myDetail))) myDetail <- cbind(myDetail, modelDat_v[xAna])
+
+  m <- lm(as.formula(paste(yAna, "~", xAna, "+ age + sex + Cohort")), data = fitDat)
+
+  # DFFITS influence
+  infl_raw  <- abs(dffits(m))
+  infl_full <- rep(NA_real_, nrow(modelDat_v))
+  infl_full[as.integer(rownames(fitDat))] <- infl_raw
+  myDetail  <- cbind(myDetail, infl_full)
+  colnames(myDetail)[ncol(myDetail)] <- paste0("infl_", myRow)
+  dffitsMax <- max(infl_raw)
+
+  myCorr   <- cor(modelDat_v[[xAna]], modelDat_v[[yAna]], use = "complete.obs")
+  myEstEff <- as.numeric(coef(m)[xAna])
+
+  yDomain      <- sub("_.*", "", yAna)
+  xDomain      <- sub("_.*", "", xAna)
+  myAssayLabel <- paste0(yDomain, ".", xDomain)
+
+  # ── mPlot line endpoints ──
+  # Same slope, per-group intercepts (Cohort is covariate, not interaction)
+  coefs <- coef(m)
+  i1 <- unname(coefs["(Intercept)"])
+  s  <- unname(coefs[xAna])
+
+  # Build intercept vector for all cohort levels
+  # Reference level gets base intercept; others get base + offset
+  intercepts <- i1
+  for (k in 2:nCo) {
+    coefName <- paste0("Cohort", cohort[k])
+    intercepts <- c(intercepts, i1 + unname(coefs[coefName]))
+  }
+
+  ra <- tapply(fitDat[[xAna]], fitDat$Cohort, range, na.rm = TRUE)
+
+  myPoints <- NULL
+  for (li in seq_along(ra)) {
+    xMin_l <- ra[[li]][1]
+    xMax_l <- ra[[li]][2]
+    y1     <- s * xMin_l + intercepts[li]
+    y2     <- s * xMax_l + intercepts[li]
+    myPoints <- c(myPoints, xMin_l, y1, xMax_l, y2)
+  }
+
+  xMin <- min(modelDat_v[[xAna]], na.rm = TRUE)
+  xMax <- max(modelDat_v[[xAna]], na.rm = TRUE)
+  yMin <- min(modelDat_v[[yAna]], na.rm = TRUE)
+  yMax <- max(modelDat_v[[yAna]], na.rm = TRUE)
+  myPoints <- c(myPoints, xMin, yMin, xMax, yMax)
+
+  thisRow <- data.frame(matrix(myPoints, nrow = 1))
+  mPlot   <- rbind(mPlot, thisRow)
+
+  mySummary <- rbind(mySummary, data.frame(
+    key = myRow, Assays = myAssayLabel,
+    Analyte1 = yAna, Analyte2 = xAna,
+    Corr = round(myCorr, 3), pCorr = bos[myRow, "obsP"],
+    estEff = myEstEff, maxInfluence = dffitsMax,
+    row.names = NULL
+  ))
+}
+
+mySummary$mPlot <- mPlot
+
+myStatement <- sprintf(
+  "Baseline predictors vs. longitudinal outcomes. N=%i, %i associations at p < %.2f. Cohort included as covariate. estEff = change in outcome per unit increase in predictor.",
+  n, nrow(bos), pThreshold
+)
+
+cohort_viz <- as.list(cohort)
+
+myConfiguration <- list(
+  assayAware     = list("true"),
+  assays         = myAssays,
+  influenceAware = list("true"),
+  cohort         = cohort_viz,
+  colors         = myColors,
+  statement      = list(myStatement)
+)
+
+myObject <- list(
+  configuration = myConfiguration,
+  statement     = myStatement,
+  config        = cohort_viz,
+  colors        = myColors,
+  summary       = mySummary,
+  detail        = myDetail
+)
+
+oJ <- toJSON(myObject, pretty = TRUE, dataframe = "columns", digits = 3)
+write(oJ, jsonOut)
+
+cat("JSON written to:", jsonOut, "\n")
+cat("Associations:", nrow(bos), "\n")
+```
