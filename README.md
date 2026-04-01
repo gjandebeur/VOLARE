@@ -11,5 +11,8 @@ Publication: Siebert JC, Neff CP, Schneider JM, Regner EH, Ohri N, Kuhn KA, Palm
 
 ## Quick Start
 To use this pipeline, fork the repository or download the pipeline.qmd file into a usable location. Edit this file's input paths at the top and run the script.
-Script will produce a json file for the visual model, this can easily be viewed on VOLARE's web application [http://aasix.cytoanalytics.com/volare/](url)
-Script is also set up to produce an mPlot using ggplot, looping over each nominal p<0.05 significant association, and also providing effect size.
+Script will produce a JSON file for the visual model, which can easily be viewed on VOLARE's web application [http://aasix.cytoanalytics.com/volare/](url)
+Script is also set up to produce an mPlot using ggplot, looping over each nominal p<0.05 significant association, and also providing the effect size.
+
+The pipeline.qmd script is currently using age and sex as covariates, but can be adjusted easily by search/replace using Ctrl + F. Check the lm() command used before running to ensure 
+it works for your question of interest.
