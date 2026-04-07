@@ -16,3 +16,16 @@ Script is also set up to produce an mPlot using ggplot, looping over each nomina
 
 The pipeline.qmd script is currently using age and sex as covariates, but can be adjusted easily by search/replace using Ctrl + F. Check the lm() command used before running to ensure 
 it works for your question of interest.
+
+### Alter these lines in the pipeline file.
+
+change domain1Cols to the "omics" grouping, eg CpG, diet, etc
+change var1, var2... into correct variables corresponding to the groupings above
+
+Outcome in the pipeline will auto calculate the change (Δ) in chosen variables
+
+*In section 4* 
+Add in the regression model being tested, including or excluding covariates (currently covariates are added in)
+ensure the crossdomain is set to compare across all associations, not just in one direction.
+
+run the pipeline and check for .JSON output to visualize.
