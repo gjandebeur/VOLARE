@@ -19,6 +19,9 @@ pThreshold <- 0.05
 # ── PREDICTOR DOMAINS ──
 # Define column name vectors for each domain in your dataset.
 # Add/remove domains as needed.
+# for example,
+# domain1Cols = grouping (CpG, diet, etc)
+# each var1,var2 = the individual CpG or diet marker (protein intake, cg00000000, etc)
 
 domain1Cols <- c("var1", "var2", "var3")
 domain2Cols <- c("var4", "var5", "var6")
